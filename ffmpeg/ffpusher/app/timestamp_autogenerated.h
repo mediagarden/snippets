@@ -1,0 +1,4 @@
+#define BH_PROJECT_NAME "ffpusher"
+#define BH_SOFTWARE_VERSION "1.0.0.0"
+#define BH_SOFTWARE_DATE "Sep 05 2021"
+#define BH_SOFTWARE_TIME "02:16:58"
