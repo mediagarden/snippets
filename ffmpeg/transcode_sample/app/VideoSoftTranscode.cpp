@@ -149,6 +149,15 @@ int VideoSoftTranscode::reset()
 int VideoSoftTranscode::sendPacket(AVPacket *packet)
 {
     int ret = 0;
+    bool bEncodeIFrame = m_EncodeParam.getEncodeIFrame();
+    if (bEncodeIFrame)
+    {
+        if (!(packet->flags & AV_PKT_FLAG_KEY))
+        {
+            ret = AVERROR(EAGAIN);
+            return ret;
+        }
+    }
     int outputFramerate = m_EncodeParam.getFramerate();
     ret = avcodec_send_packet(m_DecodeCodecCtx, packet);
     if (ret < 0)

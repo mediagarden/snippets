@@ -184,7 +184,7 @@ public:
 
 private:
     int m_EncodeMode;    //转码类型:流,图片
-    bool m_EncodeIFrame; //只转码I帧(转图片有效)
+    bool m_EncodeIFrame; //只转码I帧
 
     AVCodecID m_CodecId;
     int m_Width;
