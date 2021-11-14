@@ -1,4 +1,4 @@
-#include "VideoSoftTranscode.h"
+#include "VideoPictureSoftTranscode.h"
 
 #define LOG_TAGS "VideoSoftTranscode::"
 
@@ -62,9 +62,10 @@ static void avcodec_encoder_flush(AVCodecContext *enc_ctx)
     av_packet_free(&packet);
 }
 
-VideoSoftTranscode::VideoSoftTranscode()
+VideoPictureSoftTranscode::VideoPictureSoftTranscode()
     : m_DecodeCodecCtx(nullptr),
       m_ScaleFilterReady(false),
+      m_LastPicEncodeTime(0),
       m_ScaleFilterGraph(nullptr),
       m_ScaleBuffersinkCtx(nullptr),
       m_ScaleBuffersrcCtx(nullptr),
@@ -72,11 +73,11 @@ VideoSoftTranscode::VideoSoftTranscode()
 {
 }
 
-VideoSoftTranscode::~VideoSoftTranscode()
+VideoPictureSoftTranscode::~VideoPictureSoftTranscode()
 {
 }
 
-int VideoSoftTranscode::open()
+int VideoPictureSoftTranscode::open()
 {
     int ret = 0;
     if ((ret = openEncoder()) < 0)
@@ -88,12 +89,14 @@ int VideoSoftTranscode::open()
     {
         goto ERROR_PROC;
     }
+    m_ScaleFilterReady = false;
+    m_LastPicEncodeTime = 0;
     return ret;
 ERROR_PROC:
     return ret;
 }
 
-int VideoSoftTranscode::close()
+int VideoPictureSoftTranscode::close()
 {
     closeDecoder();
     closeScaleFilter();
@@ -102,15 +105,24 @@ int VideoSoftTranscode::close()
     return 0;
 }
 
-int VideoSoftTranscode::reset()
+int VideoPictureSoftTranscode::reset()
 {
     close();
     return open();
 }
 
-int VideoSoftTranscode::sendPacket(AVPacket *packet)
+int VideoPictureSoftTranscode::sendPacket(AVPacket *packet)
 {
     int ret = 0;
+    bool bEncodeIFrame = m_EncodeParam.getEncodeIFrame();
+    if (bEncodeIFrame)
+    {
+        if (!(packet->flags & AV_PKT_FLAG_KEY))
+        {
+            ret = AVERROR(EAGAIN);
+            return ret;
+        }
+    }
     ret = avcodec_send_packet(m_DecodeCodecCtx, packet);
     if (ret < 0)
     {
@@ -135,6 +147,7 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
     assert(frame != nullptr);
     filter_frame = av_frame_alloc();
     assert(frame != nullptr);
+
     while (ret >= 0)
     {
         ret = avcodec_receive_frame(m_DecodeCodecCtx, frame);
@@ -147,6 +160,17 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
             LOGE(LOG_TAGS "Error during decoding.\n");
             return ret;
         }
+
+        //对图像进行抽帧操作
+        int64_t nowTime = av_gettime();
+        int64_t interval = m_EncodeParam.getPicInterval() * 1000;
+        if (std::abs(nowTime - m_LastPicEncodeTime) < interval)
+        {
+            ret = AVERROR(EAGAIN);
+            break;
+        }
+
+        m_LastPicEncodeTime = nowTime;
 
         /* push the decoded frame into the filtergraph */
         if (av_buffersrc_add_frame_flags(m_ScaleBuffersrcCtx, frame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
@@ -179,12 +203,13 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
         }
         av_frame_unref(frame);
     }
+
     av_frame_free(&filter_frame);
     av_frame_free(&frame);
     return ret;
 }
 
-int VideoSoftTranscode::receivePacket(AVPacket *packet)
+int VideoPictureSoftTranscode::receivePacket(AVPacket *packet)
 {
     int ret = 0;
     ret = avcodec_receive_packet(m_EncodeCodecCtx, packet);
@@ -199,7 +224,7 @@ int VideoSoftTranscode::receivePacket(AVPacket *packet)
     return ret;
 }
 
-int VideoSoftTranscode::openDecoder()
+int VideoPictureSoftTranscode::openDecoder()
 {
     int ret = 0;
     AVCodecID codecId;
@@ -246,7 +271,7 @@ ERR_PROC:
     return ret;
 }
 
-int VideoSoftTranscode::closeDecoder()
+int VideoPictureSoftTranscode::closeDecoder()
 {
     /* flush the decoder */
     if (m_DecodeCodecCtx != nullptr)
@@ -257,7 +282,7 @@ int VideoSoftTranscode::closeDecoder()
     return 0;
 }
 
-int VideoSoftTranscode::openScaleFilter()
+int VideoPictureSoftTranscode::openScaleFilter()
 {
     char args[512];
     int ret = 0;
@@ -267,7 +292,7 @@ int VideoSoftTranscode::openScaleFilter()
     AVRational time_base = m_DecodeCodecCtx->time_base;
     AVRational sample_aspect_ratio = m_DecodeCodecCtx->sample_aspect_ratio;
 
-    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
+    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NONE};
     const AVFilter *buffersrc = avfilter_get_by_name("buffer");
     const AVFilter *buffersink = avfilter_get_by_name("buffersink");
 
@@ -370,7 +395,7 @@ ERR_PROC:
     return ret;
 }
 
-int VideoSoftTranscode::closeScaleFilter()
+int VideoPictureSoftTranscode::closeScaleFilter()
 {
     m_ScaleBuffersinkCtx = nullptr;
     m_ScaleBuffersrcCtx = nullptr;
@@ -378,20 +403,20 @@ int VideoSoftTranscode::closeScaleFilter()
     return 0;
 }
 
-int VideoSoftTranscode::openEncoder()
+int VideoPictureSoftTranscode::openEncoder()
 {
     int ret = 0;
     AVCodecID codecId;
     const AVCodec *codec = nullptr;
     codecId = m_EncodeParam.getCodecId();
-    if (codecId == AV_CODEC_ID_H264)
-    {
-        codec = avcodec_find_encoder_by_name("libx264");
-    }
-    else if (codecId == AV_CODEC_ID_HEVC)
-    {
-        codec = avcodec_find_encoder_by_name("libx265");
-    }
+    // if (codecId == AV_CODEC_ID_H264)
+    // {
+    //     codec = avcodec_find_encoder_by_name("libx264");
+    // }
+    // else if (codecId == AV_CODEC_ID_HEVC)
+    // {
+    //     codec = avcodec_find_encoder_by_name("libx265");
+    // }
 
     if (codec == nullptr)
     {
@@ -435,7 +460,7 @@ ERR_PROC:
     return ret;
 }
 
-int VideoSoftTranscode::closeEncoder()
+int VideoPictureSoftTranscode::closeEncoder()
 {
     /* flush the encoder */
     if (m_EncodeCodecCtx != nullptr)
@@ -446,7 +471,7 @@ int VideoSoftTranscode::closeEncoder()
     return 0;
 }
 
-int VideoSoftTranscode::updateEncoder()
+int VideoPictureSoftTranscode::updateEncoder()
 {
     int bitrate = m_EncodeParam.getBitrate();
     int width = m_EncodeParam.getVideoSize().Width;
@@ -471,7 +496,7 @@ int VideoSoftTranscode::updateEncoder()
      */
     m_EncodeCodecCtx->gop_size = iFrameInterval;
     m_EncodeCodecCtx->max_b_frames = 0;
-    m_EncodeCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+    m_EncodeCodecCtx->pix_fmt = AV_PIX_FMT_YUVJ420P;
     //TODO:add flags
     return 0;
 }

@@ -2,12 +2,13 @@
 // Created by Jinzhu on 2021/11/11.
 //
 
-#ifndef VIDEO_INTEL_QSV_TRANSCODE_H
-#define VIDEO_INTEL_QSV_TRANSCODE_H
+#ifndef VIDEO_SOFT_TRANSCODE_H
+#define VIDEO_SOFT_TRANSCODE_H
 
 #include <string>
 #include <mutex>
 #include <thread>
+#include <cassert>
 
 #define __STDC_CONSTANT_MACROS
 
@@ -36,14 +37,14 @@ extern "C"
 #include "VideoTranscode.h"
 
 /**
- * @brief Intel硬件转码类
+ * @brief 软件转码类
  * 
  */
-class VideoQsvTranscode : public VideoTranscode
+class VideoSoftTranscode : public VideoTranscode
 {
 public:
-    VideoQsvTranscode();
-    virtual ~VideoQsvTranscode();
+    VideoSoftTranscode();
+    virtual ~VideoSoftTranscode();
 
     int open();
 
@@ -54,6 +55,28 @@ public:
     int sendPacket(AVPacket *packet);
 
     int receivePacket(AVPacket *packet);
+
+private: //functions
+    int openDecoder();
+    int closeDecoder();
+
+    int openScaleFilter();
+    int closeScaleFilter();
+
+    int openEncoder();
+    int closeEncoder();
+
+    int updateEncoder();
+
+private: //members
+    bool m_ScaleFilterReady;
+    int64_t m_LastEncodePts;
+    VideoFpsCalculater m_FpsCalculater;
+    AVCodecContext *m_DecodeCodecCtx;
+    AVFilterGraph *m_ScaleFilterGraph;
+    AVFilterContext *m_ScaleBuffersinkCtx;
+    AVFilterContext *m_ScaleBuffersrcCtx;
+    AVCodecContext *m_EncodeCodecCtx;
 };
 
-#endif //VIDEO_INTEL_QSV_TRANSCODE_H
+#endif //VIDEO_SOFT_TRANSCODE_H

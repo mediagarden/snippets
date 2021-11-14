@@ -5,6 +5,12 @@
 #ifndef VIDEOTRANSCODE_H
 #define VIDEOTRANSCODE_H
 
+#include <string>
+#include <mutex>
+#include <chrono>
+#include <thread>
+#include <cassert>
+
 #define __STDC_CONSTANT_MACROS
 
 #ifdef __cplusplus
@@ -29,7 +35,7 @@ extern "C"
 };
 #endif
 
-#define VIDEO_ENCODE_STEAM (0)
+#define VIDEO_ENCODE_STREAM (0)
 #define VIDEO_ENCODE_PICTURE (1)
 
 struct VideoSize
@@ -82,13 +88,34 @@ public:
           m_Framerate(30),
           m_Bitrate(500),
           m_IFrameInterval(12),
-          m_EncodeMode(VIDEO_ENCODE_STEAM),
-          m_PicInterval(0)
+          m_EncodeMode(VIDEO_ENCODE_STREAM),
+          m_PicInterval(0),
+          m_EncodeIFrame(false)
     {
     }
 
     virtual ~VideoEncodeParam()
     {
+    }
+
+    void setEncodeMode(int encodeMode)
+    {
+        m_EncodeMode = encodeMode;
+    }
+
+    int getEncodeMode()
+    {
+        return m_EncodeMode;
+    }
+
+    void setEncodeIFrame(bool encodeIFrame)
+    {
+        m_EncodeIFrame = encodeIFrame;
+    }
+
+    bool getEncodeIFrame()
+    {
+        return m_EncodeIFrame;
     }
 
     void setCodecId(AVCodecID codecId)
@@ -145,16 +172,6 @@ public:
         return m_IFrameInterval;
     }
 
-    void setEncodeMode(int encodeMode)
-    {
-        m_EncodeMode = encodeMode;
-    }
-
-    int getEncodeMode()
-    {
-        return m_EncodeMode;
-    }
-
     void setPicInterval(int picInterval)
     {
         m_PicInterval = picInterval;
@@ -166,14 +183,47 @@ public:
     }
 
 private:
+    int m_EncodeMode;    //转码类型:流,图片
+    bool m_EncodeIFrame; //只转码I帧(转图片有效)
+
     AVCodecID m_CodecId;
     int m_Width;
     int m_Height;
     int m_Framerate;
     int m_Bitrate;
     int m_IFrameInterval;
-    int m_EncodeMode;
-    int m_PicInterval;
+
+    int m_PicInterval; //图片转码输出间隔(ms)
+};
+
+class VideoFpsCalculater
+{
+public:
+    VideoFpsCalculater();
+    virtual ~VideoFpsCalculater();
+
+    void onVideoFrame(uint64_t curFramePTS);
+
+    int getFrameRate();
+
+private:
+    void calcFrameRate();
+    
+    void reset();
+
+    int64_t m_s64LastRecvTime;     //上一次收流时间
+    uint64_t m_u64LastFramePTS;    //上一帧的PTS
+    uint64_t m_u64CurFramePTS;     //当前帧的PTS
+    uint64_t m_u64FramePTSBase;    //帧率微调的基准PTS
+    uint64_t m_u64LastPTSInterval; //上一帧的PTS间隔
+    uint64_t m_u64CurPTSInterval;  //当前帧的PTS间隔
+    uint32_t m_uFrameNum;          //帧率微调的帧计数
+    uint32_t m_uFrameRate;         //当前帧率(根据PTS统计的帧率)
+    uint32_t m_uFrameRateLastStat; //上一次统计的帧率
+
+    uint32_t m_uFrameNumPerSec;                       //当前帧率(根据帧计数统计的帧率)
+    uint32_t m_uFrameCount;                           //帧计数
+    std::chrono::system_clock::time_point m_StatTime; //帧计数起始时间
 };
 
 class VideoTranscode
