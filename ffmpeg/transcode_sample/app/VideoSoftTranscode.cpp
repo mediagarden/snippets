@@ -99,7 +99,6 @@ static void avcodec_encoder_flush(AVCodecContext *enc_ctx)
 VideoSoftTranscode::VideoSoftTranscode()
     : m_DecodeCodecCtx(nullptr),
       m_LastEncodePts(0),
-      m_FpsCalculater(),
       m_ScaleFilterReady(false),
       m_ScaleFilterGraph(nullptr),
       m_ScaleBuffersinkCtx(nullptr),
@@ -198,8 +197,6 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
         }
 
         //对视频进行抽帧
-        m_FpsCalculater.onVideoFrame(frame->pts);
-
         int64_t outputInterval = 0;
         if (outputFramerate > 0)
         {

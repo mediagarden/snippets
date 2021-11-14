@@ -71,7 +71,6 @@ private: //functions
 private: //members
     bool m_ScaleFilterReady;
     int64_t m_LastEncodePts;
-    VideoFpsCalculater m_FpsCalculater;
     AVCodecContext *m_DecodeCodecCtx;
     AVFilterGraph *m_ScaleFilterGraph;
     AVFilterContext *m_ScaleBuffersinkCtx;
