@@ -100,6 +100,7 @@ VideoSoftTranscode::VideoSoftTranscode()
     : m_DecodeCodecCtx(nullptr),
       m_LastEncodePts(0),
       m_ScaleFilterReady(false),
+      m_EncodeCodecReady(false),
       m_ScaleFilterGraph(nullptr),
       m_ScaleBuffersinkCtx(nullptr),
       m_ScaleBuffersrcCtx(nullptr),
@@ -115,15 +116,12 @@ VideoSoftTranscode::~VideoSoftTranscode()
 int VideoSoftTranscode::open()
 {
     int ret = 0;
-    if ((ret = openEncoder()) < 0)
-    {
-        goto ERROR_PROC;
-    }
-
     if ((ret = openDecoder()) < 0)
     {
+        LOGE(LOG_TAGS "Failed to open decoder.\n");
         goto ERROR_PROC;
     }
+    m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
     m_LastEncodePts = 0;
     return ret;
@@ -131,6 +129,7 @@ ERROR_PROC:
     closeDecoder();
     closeScaleFilter();
     closeEncoder();
+    m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
     m_LastEncodePts = 0;
     return ret;
@@ -141,6 +140,7 @@ int VideoSoftTranscode::close()
     closeDecoder();
     closeScaleFilter();
     closeEncoder();
+    m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
     m_LastEncodePts = 0;
     return 0;
@@ -159,7 +159,7 @@ int VideoSoftTranscode::getVideoCodecPar(AVCodecParameters *codecpar)
 
 bool VideoSoftTranscode::readyForReceive()
 {
-    return m_ScaleFilterReady;
+    return (m_ScaleFilterReady && m_EncodeCodecReady);
 }
 
 int VideoSoftTranscode::sendPacket(AVPacket *packet)
@@ -193,23 +193,36 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
         ret = avcodec_receive_frame(m_DecodeCodecCtx, frame);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
         {
-            return ret;
+            goto ERROR_PROC;
         }
         else if (ret < 0)
         {
             LOGE(LOG_TAGS "Error during decoding.\n");
-            return ret;
+            goto ERROR_PROC;
         }
 
         if (!m_ScaleFilterReady)
         {
+            closeScaleFilter();
             if ((ret = openScaleFilter()) < 0)
             {
                 LOGE(LOG_TAGS "Open scale filter failed.\n");
-                return ret;
+                goto ERROR_PROC;
             }
-            LOGI(LOG_TAGS "Open scale filter success.\n");
             m_ScaleFilterReady = true;
+            LOGI(LOG_TAGS "Open scale filter success.\n");
+        }
+
+        if (!m_EncodeCodecReady)
+        {
+            closeEncoder();
+            if ((ret = openEncoder()) < 0)
+            {
+                LOGE(LOG_TAGS "Open encoder codec failed.\n");
+                goto ERROR_PROC;
+            }
+            m_EncodeCodecReady = true;
+            LOGI(LOG_TAGS "Open encoder codec success.\n");
         }
 
         //对视频进行抽帧
@@ -261,6 +274,7 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
         }
         av_frame_unref(frame);
     }
+ERROR_PROC:
     av_frame_free(&filter_frame);
     av_frame_free(&frame);
     return ret;
@@ -291,6 +305,7 @@ int VideoSoftTranscode::openDecoder()
     AVCodecID codecId;
     const AVCodec *codec = nullptr;
     codecId = m_DecodeParam.getCodecId();
+
     if (codecId == AV_CODEC_ID_H264)
     {
         codec = avcodec_find_decoder_by_name("libx264");
@@ -329,6 +344,7 @@ int VideoSoftTranscode::openDecoder()
     LOGI(LOG_TAGS "Open decoder codec success.\n");
     return 0;
 ERR_PROC:
+    closeDecoder();
     return ret;
 }
 
@@ -516,10 +532,12 @@ int VideoSoftTranscode::openEncoder()
         LOGE(LOG_TAGS "Could not open encoder codec.\n");
         goto ERR_PROC;
     }
-
+    av_dict_free(&opt);
     LOGI(LOG_TAGS "Open encoder codec success.\n");
     return 0;
 ERR_PROC:
+    closeEncoder();
+    av_dict_free(&opt);
     return ret;
 }
 

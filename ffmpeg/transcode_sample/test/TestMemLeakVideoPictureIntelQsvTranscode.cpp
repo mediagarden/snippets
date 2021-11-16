@@ -46,9 +46,9 @@ MAIN_BEGIN:
     decodeParam.setCodecId(AV_CODEC_ID_H264);
     transcode.setDecodeParam(decodeParam);
 
-    encodeParam.setEncodeMode(VIDEO_ENCODE_PICTURE);
+    encodeParam.setEncodeMode(VIDEO_ENCODE_STREAM);
     encodeParam.setEncodeIFrame(false);
-    encodeParam.setCodecId(AV_CODEC_ID_MJPEG);
+    encodeParam.setCodecId(AV_CODEC_ID_H264);
     encodeParam.setBitrate(500);
     encodeParam.setVideoSize(VideoSize{352, 288});
     encodeParam.setFramerate(25);

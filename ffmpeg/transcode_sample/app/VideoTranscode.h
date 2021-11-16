@@ -185,7 +185,7 @@ public:
 private:
     int m_EncodeMode;    //转码类型:流,图片
     bool m_EncodeIFrame; //只转码I帧,仅对转图片有效
-                         //转流的话帧率过低SRS不支持
+                         //转码视频流,帧率过低SRS不支持
 
     AVCodecID m_CodecId;
     int m_Width;
@@ -197,35 +197,6 @@ private:
     int m_PicInterval; //图片转码输出间隔(ms)
 };
 
-class VideoFpsCalculater
-{
-public:
-    VideoFpsCalculater();
-    virtual ~VideoFpsCalculater();
-
-    void onVideoFrame(uint64_t curFramePTS);
-
-    int getFrameRate();
-
-private:
-    void calcFrameRate();
-
-    void reset();
-
-    int64_t m_s64LastRecvTime;     //上一次收流时间
-    uint64_t m_u64LastFramePTS;    //上一帧的PTS
-    uint64_t m_u64CurFramePTS;     //当前帧的PTS
-    uint64_t m_u64FramePTSBase;    //帧率微调的基准PTS
-    uint64_t m_u64LastPTSInterval; //上一帧的PTS间隔
-    uint64_t m_u64CurPTSInterval;  //当前帧的PTS间隔
-    uint32_t m_uFrameNum;          //帧率微调的帧计数
-    uint32_t m_uFrameRate;         //当前帧率(根据PTS统计的帧率)
-    uint32_t m_uFrameRateLastStat; //上一次统计的帧率
-
-    uint32_t m_uFrameNumPerSec;                       //当前帧率(根据帧计数统计的帧率)
-    uint32_t m_uFrameCount;                           //帧计数
-    std::chrono::system_clock::time_point m_StatTime; //帧计数起始时间
-};
 
 class VideoTranscode
 {

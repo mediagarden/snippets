@@ -6,7 +6,8 @@ using namespace std;
 #include "StreamWriter.h"
 
 #include "VideoTranscode.h"
-#include "VideoPictureIntelQsvTranscode.h"
+#include "VideoSoftTranscode.h"
+#include "VideoIntelQsvTranscode.h"
 
 #define LOG_TAGS "app_main::"
 
@@ -20,7 +21,9 @@ int main(int argc, char *argv[])
     av_log_set_level(AV_LOG_DEBUG);
     //av_log_set_level(AV_LOG_INFO);
 
-    VideoPictureIntelQsvTranscode transcode;
+    bool outputOpen;
+    VideoIntelQsvTranscode transcode;
+    StreamWriter writer;
     StreamReader reader;
 
     AVCodecParameters *videoCodecpar = nullptr;
@@ -35,6 +38,7 @@ int main(int argc, char *argv[])
 MAIN_BEGIN:
     printf("main begin.\n");
     transcode.close();
+    writer.close();
     reader.close();
 
     reader.setDataSource("rtmp://172.17.6.106:1935/live/Test", "flv");
@@ -46,9 +50,9 @@ MAIN_BEGIN:
     decodeParam.setCodecId(AV_CODEC_ID_H264);
     transcode.setDecodeParam(decodeParam);
 
-    encodeParam.setEncodeMode(VIDEO_ENCODE_PICTURE);
+    encodeParam.setEncodeMode(VIDEO_ENCODE_STREAM);
     encodeParam.setEncodeIFrame(false);
-    encodeParam.setCodecId(AV_CODEC_ID_MJPEG);
+    encodeParam.setCodecId(AV_CODEC_ID_H264);
     encodeParam.setBitrate(500);
     encodeParam.setVideoSize(VideoSize{352, 288});
     encodeParam.setFramerate(25);
@@ -59,6 +63,8 @@ MAIN_BEGIN:
 
     transcode.open();
 
+    outputOpen = false;
+
     if (main_loop > 10)
     {
         goto MAIN_END;
@@ -68,17 +74,37 @@ MAIN_BEGIN:
     {
         if (transcode.readyForReceive())
         {
-
-            packet = av_packet_alloc();
-            while (transcode.receivePacket(packet) == 0)
+            if (!outputOpen)
             {
-                printf("get pic id:%d pts:%lld.\n", packet->stream_index, packet->pts);
-                FILE *pTotalFile = fopen("preview.jpg", "wb");
-                fwrite(packet->data, 1, packet->size, pTotalFile);
-                fclose(pTotalFile);
-                av_packet_unref(packet);
+                writer.setDataSource("rtmp://172.17.6.106:1935/live/Test_cdif", "flv");
+
+                videoCodecpar = avcodec_parameters_alloc();
+                audioCodecpar = avcodec_parameters_alloc();
+                reader.getAudioCodecPar(audioCodecpar);
+                transcode.getVideoCodecPar(videoCodecpar);
+
+                writer.setAudioCodecPar(audioCodecpar);
+                writer.setVideoCodecPar(videoCodecpar);
+
+                writer.open();
+
+                avcodec_parameters_free(&audioCodecpar);
+                avcodec_parameters_free(&videoCodecpar);
+                outputOpen = true;
             }
-            av_packet_free(&packet);
+
+            if (outputOpen)
+            {
+                packet = av_packet_alloc();
+                while (transcode.receivePacket(packet) == 0)
+                {
+                    packet->stream_index = writer.getVideoStream()->index;
+                    printf("push video id:%d dts:%lld pts:%lld.\n", packet->stream_index, packet->dts, packet->pts);
+                    writer.writePacket(packet);
+                    av_packet_unref(packet);
+                }
+                av_packet_free(&packet);
+            }
         }
 
         packet = av_packet_alloc();
@@ -88,6 +114,14 @@ MAIN_BEGIN:
             {
                 //printf("transcode::sendPacket\n");
                 transcode.sendPacket(packet);
+            }
+            else if (packet->stream_index == reader.getAudioStream()->index)
+            {
+                if (outputOpen)
+                {
+                    packet->stream_index = writer.getAudioStream()->index;
+                    writer.writePacket(packet);
+                }
             }
         }
         av_packet_free(&packet);
@@ -105,6 +139,7 @@ MAIN_END:
 
     reader.close();
     transcode.close();
+    writer.close();
 
     return 0;
 }

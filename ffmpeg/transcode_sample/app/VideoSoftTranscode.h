@@ -38,6 +38,7 @@ extern "C"
 
 /**
  * @brief 软件转码类
+ * Valgrind Test OK
  * 
  */
 class VideoSoftTranscode : public VideoTranscode
@@ -74,6 +75,7 @@ private: //functions
 
 private: //members
     bool m_ScaleFilterReady;
+    bool m_EncodeCodecReady;
     int64_t m_LastEncodePts;
     AVCodecContext *m_DecodeCodecCtx;
     AVFilterGraph *m_ScaleFilterGraph;

@@ -93,11 +93,6 @@ static void avcodec_decoder_flush(AVCodecContext *dec_ctx)
     int ret = 0;
     AVFrame *frame = av_frame_alloc();
     assert(frame != nullptr);
-    ret = avcodec_send_packet(dec_ctx, nullptr);
-    if (ret < 0)
-    {
-        LOGE(LOG_TAGS "Error sending a packet for decoding.\n");
-    }
 
     while (ret >= 0)
     {
@@ -155,23 +150,24 @@ VideoIntelQsvTranscode::VideoIntelQsvTranscode()
       m_ScaleBuffersrcCtx(nullptr),
       m_EncodeCodecCtx(nullptr)
 {
-    if (av_hwdevice_ctx_create(&m_HwDeviceCtx, AV_HWDEVICE_TYPE_QSV, NULL, NULL, 0) < 0)
-    {
-        LOGE(LOG_TAGS "Failed to create a QSV device.\n");
-    }
 }
 
 VideoIntelQsvTranscode::~VideoIntelQsvTranscode()
 {
     close();
-    av_buffer_unref(&m_HwDeviceCtx);
 }
 
 int VideoIntelQsvTranscode::open()
 {
     int ret = 0;
+    if ((ret = av_hwdevice_ctx_create(&m_HwDeviceCtx, AV_HWDEVICE_TYPE_QSV, NULL, NULL, 0)) < 0)
+    {
+        LOGE(LOG_TAGS "Failed to create a QSV device.\n");
+        goto ERROR_PROC;
+    }
     if ((ret = openDecoder()) < 0)
     {
+        LOGE(LOG_TAGS "Failed to open decoder.\n");
         goto ERROR_PROC;
     }
     m_EncodeCodecReady = false;
@@ -182,6 +178,7 @@ ERROR_PROC:
     closeDecoder();
     closeScaleFilter();
     closeEncoder();
+    av_buffer_unref(&m_HwDeviceCtx);
     m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
     m_LastEncodePts = 0;
@@ -193,6 +190,7 @@ int VideoIntelQsvTranscode::close()
     closeDecoder();
     closeScaleFilter();
     closeEncoder();
+    av_buffer_unref(&m_HwDeviceCtx);
     m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
     m_LastEncodePts = 0;
@@ -246,31 +244,33 @@ int VideoIntelQsvTranscode::sendPacket(AVPacket *packet)
         ret = avcodec_receive_frame(m_DecodeCodecCtx, frame);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
         {
-            return ret;
+            goto ERROR_PROC;
         }
         else if (ret < 0)
         {
             LOGE(LOG_TAGS "Error during decoding.\n");
-            return ret;
+            goto ERROR_PROC;
         }
 
         if (!m_ScaleFilterReady)
         {
+            closeScaleFilter();
             if ((ret = openScaleFilter()) < 0)
             {
                 LOGE(LOG_TAGS "Open scale filter failed.\n");
-                return ret;
+                goto ERROR_PROC;
             }
-            LOGI(LOG_TAGS "Open scale filter success.\n");
             m_ScaleFilterReady = true;
+            LOGI(LOG_TAGS "Open scale filter success.\n");
         }
 
         if (!m_EncodeCodecReady)
         {
+            closeEncoder();
             if ((ret = openEncoder()) < 0)
             {
                 LOGE(LOG_TAGS "Open encoder codec failed.\n");
-                return ret;
+                goto ERROR_PROC;
             }
             m_EncodeCodecReady = true;
             LOGI(LOG_TAGS "Open encoder codec success.\n");
@@ -325,6 +325,7 @@ int VideoIntelQsvTranscode::sendPacket(AVPacket *packet)
         }
         av_frame_unref(frame);
     }
+ERROR_PROC:
     av_frame_free(&filter_frame);
     av_frame_free(&frame);
     return ret;
@@ -355,6 +356,7 @@ int VideoIntelQsvTranscode::openDecoder()
     AVCodecID codecId;
     const AVCodec *codec = nullptr;
     codecId = m_DecodeParam.getCodecId();
+
     if (codecId == AV_CODEC_ID_H264)
     {
         codec = avcodec_find_decoder_by_name("h264_qsv");
@@ -396,6 +398,7 @@ int VideoIntelQsvTranscode::openDecoder()
     LOGI(LOG_TAGS "Open decoder codec success.\n");
     return 0;
 ERR_PROC:
+    closeDecoder();
     return ret;
 }
 
@@ -601,10 +604,12 @@ int VideoIntelQsvTranscode::openEncoder()
         LOGE(LOG_TAGS "Could not open encoder codec.\n");
         goto ERR_PROC;
     }
-
+    av_dict_free(&opt);
     LOGI(LOG_TAGS "Open encoder codec success.\n");
     return 0;
 ERR_PROC:
+    closeEncoder();
+    av_dict_free(&opt);
     return ret;
 }
 

@@ -74,6 +74,7 @@ private: //functions
 
 private: //members
     bool m_ScaleFilterReady;
+    bool m_EncodeCodecReady;
     int64_t m_LastPicEncodeTime;
     AVCodecContext *m_DecodeCodecCtx;
     AVFilterGraph *m_ScaleFilterGraph;
