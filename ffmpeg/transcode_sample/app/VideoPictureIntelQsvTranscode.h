@@ -2,8 +2,8 @@
 // Created by Jinzhu on 2021/11/11.
 //
 
-#ifndef VIDEO_PICTURE_SOFT_TRANSCODE_H
-#define VIDEO_PICTURE_SOFT_TRANSCODE_H
+#ifndef VIDEO_PICTURE_INTEL_QSV_TRANSCODE_H
+#define VIDEO_PICTURE_INTEL_QSV_TRANSCODE_H
 
 #include <string>
 #include <mutex>
@@ -37,14 +37,14 @@ extern "C"
 #include "VideoTranscode.h"
 
 /**
- * @brief 软件转码图片类
+ * @brief Intel硬件转码图片类
  * 
  */
-class VideoPictureSoftTranscode : public VideoTranscode
+class VideoPictureIntelQsvTranscode : public VideoTranscode
 {
 public:
-    VideoPictureSoftTranscode();
-    virtual ~VideoPictureSoftTranscode();
+    VideoPictureIntelQsvTranscode();
+    virtual ~VideoPictureIntelQsvTranscode();
 
     int open();
 
@@ -74,7 +74,9 @@ private: //functions
 
 private: //members
     bool m_ScaleFilterReady;
+    bool m_EncodeCodecReady;
     int64_t m_LastPicEncodeTime;
+    AVBufferRef *m_HwDeviceCtx;
     AVCodecContext *m_DecodeCodecCtx;
     AVFilterGraph *m_ScaleFilterGraph;
     AVFilterContext *m_ScaleBuffersinkCtx;
@@ -82,4 +84,4 @@ private: //members
     AVCodecContext *m_EncodeCodecCtx;
 };
 
-#endif //VIDEO_PICTURE_SOFT_TRANSCODE_H
+#endif //VIDEO_PICTURE_INTEL_QSV_TRANSCODE_H

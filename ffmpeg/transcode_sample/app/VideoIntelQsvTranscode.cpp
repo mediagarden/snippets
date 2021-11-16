@@ -1,10 +1,92 @@
-#include "VideoPictureSoftTranscode.h"
+#include "VideoIntelQsvTranscode.h"
 
-#define LOG_TAGS "VideoPictureSoftTranscode::"
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_qsv.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+
+#include <mfx/mfxvideo.h>
+
+#define LOG_TAGS "VideoIntelQsvTranscode::"
 
 #define LOGD(...) av_log(NULL, AV_LOG_DEBUG, __VA_ARGS__) //Log().d
 #define LOGI(...) av_log(NULL, AV_LOG_INFO, __VA_ARGS__)  //Log().i
 #define LOGE(...) av_log(NULL, AV_LOG_ERROR, __VA_ARGS__) //Log().e
+
+static enum AVPixelFormat get_format(AVCodecContext *ctx,
+                                     const enum AVPixelFormat *pix_fmts)
+{
+    while (*pix_fmts != AV_PIX_FMT_NONE)
+    {
+        if (*pix_fmts == AV_PIX_FMT_QSV)
+        {
+            AVHWFramesContext *frames_ctx;
+            AVQSVFramesContext *frames_hwctx;
+            int ret;
+
+            /* create a pool of surfaces to be used by the decoder */
+            ctx->hw_frames_ctx = av_hwframe_ctx_alloc(ctx->hw_device_ctx);
+            if (!ctx->hw_frames_ctx)
+                return AV_PIX_FMT_NONE;
+            frames_ctx = (AVHWFramesContext *)ctx->hw_frames_ctx->data;
+            frames_hwctx = (AVQSVFramesContext *)frames_ctx->hwctx;
+
+            frames_ctx->format = AV_PIX_FMT_QSV;
+            frames_ctx->sw_format = ctx->sw_pix_fmt;
+            frames_ctx->width = FFALIGN(ctx->coded_width, 32);
+            frames_ctx->height = FFALIGN(ctx->coded_height, 32);
+            frames_ctx->initial_pool_size = 32;
+
+            frames_hwctx->frame_type = MFX_MEMTYPE_VIDEO_MEMORY_DECODER_TARGET;
+
+            ret = av_hwframe_ctx_init(ctx->hw_frames_ctx);
+            if (ret < 0)
+                return AV_PIX_FMT_NONE;
+
+            return AV_PIX_FMT_QSV;
+        }
+
+        pix_fmts++;
+    }
+
+    fprintf(stderr, "The QSV pixel format not offered in get_format()\n");
+
+    return AV_PIX_FMT_NONE;
+}
+
+static int get_interval_by_framerate(int framerate)
+{
+    if (framerate == 0)
+    {
+        return 0;
+    }
+
+    int interval = 1000000 / framerate;
+    if (framerate == 60)
+    {
+        interval = 16667;
+    }
+    else if (framerate == 30)
+    {
+        interval = 33333;
+    }
+    return interval;
+}
+
+static int need_drop_by_pts(int64_t output_interval, int64_t last_pts, int64_t pts)
+{
+    //上一帧的PTS
+    int64_t lastPTS = last_pts;
+    //当前帧的PTS
+    int64_t curPTS = pts;
+
+    //上一帧的显示序号
+    int64_t lastIndex = lastPTS / output_interval;
+    //当前帧的显示序号
+    int64_t curIndex = curPTS / output_interval;
+
+    return (lastIndex == curIndex) ? 1 : 0;
+}
 
 static void avcodec_decoder_flush(AVCodecContext *dec_ctx)
 {
@@ -62,73 +144,78 @@ static void avcodec_encoder_flush(AVCodecContext *enc_ctx)
     av_packet_free(&packet);
 }
 
-VideoPictureSoftTranscode::VideoPictureSoftTranscode()
+VideoIntelQsvTranscode::VideoIntelQsvTranscode()
     : m_DecodeCodecCtx(nullptr),
-      m_LastPicEncodeTime(0),
+      m_HwDeviceCtx(nullptr),
+      m_LastEncodePts(0),
       m_ScaleFilterReady(false),
+      m_EncodeCodecReady(false),
       m_ScaleFilterGraph(nullptr),
       m_ScaleBuffersinkCtx(nullptr),
       m_ScaleBuffersrcCtx(nullptr),
       m_EncodeCodecCtx(nullptr)
 {
+    if (av_hwdevice_ctx_create(&m_HwDeviceCtx, AV_HWDEVICE_TYPE_QSV, NULL, NULL, 0) < 0)
+    {
+        LOGE(LOG_TAGS "Failed to create a QSV device.\n");
+    }
 }
 
-VideoPictureSoftTranscode::~VideoPictureSoftTranscode()
+VideoIntelQsvTranscode::~VideoIntelQsvTranscode()
 {
     close();
+    av_buffer_unref(&m_HwDeviceCtx);
 }
 
-int VideoPictureSoftTranscode::open()
+int VideoIntelQsvTranscode::open()
 {
     int ret = 0;
-    if ((ret = openEncoder()) < 0)
-    {
-        goto ERROR_PROC;
-    }
-
     if ((ret = openDecoder()) < 0)
     {
         goto ERROR_PROC;
     }
+    m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
-    m_LastPicEncodeTime = 0;
+    m_LastEncodePts = 0;
     return ret;
 ERROR_PROC:
     closeDecoder();
     closeScaleFilter();
     closeEncoder();
+    m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
-    m_LastPicEncodeTime = 0;
+    m_LastEncodePts = 0;
     return ret;
 }
 
-int VideoPictureSoftTranscode::close()
+int VideoIntelQsvTranscode::close()
 {
     closeDecoder();
     closeScaleFilter();
     closeEncoder();
+    m_EncodeCodecReady = false;
     m_ScaleFilterReady = false;
-    m_LastPicEncodeTime = 0;
+    m_LastEncodePts = 0;
     return 0;
 }
 
-int VideoPictureSoftTranscode::reset()
+int VideoIntelQsvTranscode::reset()
 {
     close();
     return open();
 }
 
-int VideoPictureSoftTranscode::getVideoCodecPar(AVCodecParameters *codecpar)
+int VideoIntelQsvTranscode::getVideoCodecPar(AVCodecParameters *codecpar)
 {
     return avcodec_parameters_from_context(codecpar, m_EncodeCodecCtx);
 }
 
-bool VideoPictureSoftTranscode::readyForReceive()
+bool VideoIntelQsvTranscode::readyForReceive()
 {
-    return m_ScaleFilterReady;
+    return (m_ScaleFilterReady && m_EncodeCodecReady);
 }
 
-int VideoPictureSoftTranscode::sendPacket(AVPacket *packet)
+int VideoIntelQsvTranscode::sendPacket(AVPacket *packet)
 {
     int ret = 0;
     bool bEncodeIFrame = m_EncodeParam.getEncodeIFrame();
@@ -140,6 +227,7 @@ int VideoPictureSoftTranscode::sendPacket(AVPacket *packet)
             return ret;
         }
     }
+    int outputFramerate = m_EncodeParam.getFramerate();
     ret = avcodec_send_packet(m_DecodeCodecCtx, packet);
     if (ret < 0)
     {
@@ -177,22 +265,34 @@ int VideoPictureSoftTranscode::sendPacket(AVPacket *packet)
             m_ScaleFilterReady = true;
         }
 
-        //对图像进行抽帧操作
-        int64_t nowTime = av_gettime();
-        int64_t interval = m_EncodeParam.getPicInterval() * 1000;
-        if (std::abs(nowTime - m_LastPicEncodeTime) < interval)
+        if (!m_EncodeCodecReady)
         {
-            ret = AVERROR(EAGAIN);
-            break;
+            if ((ret = openEncoder()) < 0)
+            {
+                LOGE(LOG_TAGS "Open encoder codec failed.\n");
+                return ret;
+            }
+            m_EncodeCodecReady = true;
+            LOGI(LOG_TAGS "Open encoder codec success.\n");
         }
 
-        m_LastPicEncodeTime = nowTime;
-
-        /* push the decoded frame into the filtergraph */
-        if (av_buffersrc_add_frame_flags(m_ScaleBuffersrcCtx, frame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
+        //对视频进行抽帧
+        int64_t outputInterval = 0;
+        if (outputFramerate > 0)
         {
-            LOGE(LOG_TAGS "Error while feeding the filtergraph.\n");
-            break;
+            //需要抽帧
+            outputInterval = get_interval_by_framerate(outputFramerate);
+        }
+
+        if ((outputInterval == 0) || (!need_drop_by_pts(outputInterval, m_LastEncodePts, frame->pts)))
+        {
+            m_LastEncodePts = frame->pts;
+            /* push the decoded frame into the filtergraph */
+            if (av_buffersrc_add_frame_flags(m_ScaleBuffersrcCtx, frame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0)
+            {
+                LOGE(LOG_TAGS "Error while feeding the filtergraph.\n");
+                break;
+            }
         }
 
         /* pull filtered frames from the filtergraph */
@@ -211,6 +311,11 @@ int VideoPictureSoftTranscode::sendPacket(AVPacket *packet)
 
             //送编码的帧,不需要指定帧类型
             filter_frame->pict_type = AV_PICTURE_TYPE_NONE;
+            //如果只送I帧,则编为I帧
+            if (bEncodeIFrame)
+            {
+                filter_frame->pict_type = AV_PICTURE_TYPE_I;
+            }
             if ((ret = avcodec_send_frame(m_EncodeCodecCtx, filter_frame)) < 0)
             {
                 LOGE(LOG_TAGS "Error sending a packet for decoding.\n");
@@ -220,13 +325,12 @@ int VideoPictureSoftTranscode::sendPacket(AVPacket *packet)
         }
         av_frame_unref(frame);
     }
-
     av_frame_free(&filter_frame);
     av_frame_free(&frame);
     return ret;
 }
 
-int VideoPictureSoftTranscode::receivePacket(AVPacket *packet)
+int VideoIntelQsvTranscode::receivePacket(AVPacket *packet)
 {
     int ret = 0;
     if (!readyForReceive())
@@ -245,7 +349,7 @@ int VideoPictureSoftTranscode::receivePacket(AVPacket *packet)
     return ret;
 }
 
-int VideoPictureSoftTranscode::openDecoder()
+int VideoIntelQsvTranscode::openDecoder()
 {
     int ret = 0;
     AVCodecID codecId;
@@ -253,11 +357,11 @@ int VideoPictureSoftTranscode::openDecoder()
     codecId = m_DecodeParam.getCodecId();
     if (codecId == AV_CODEC_ID_H264)
     {
-        codec = avcodec_find_decoder_by_name("libx264");
+        codec = avcodec_find_decoder_by_name("h264_qsv");
     }
     else if (codecId == AV_CODEC_ID_HEVC)
     {
-        codec = avcodec_find_decoder_by_name("libx265");
+        codec = avcodec_find_decoder_by_name("hevc_qsv");
     }
 
     if (codec == nullptr)
@@ -280,6 +384,9 @@ int VideoPictureSoftTranscode::openDecoder()
         goto ERR_PROC;
     }
 
+    m_DecodeCodecCtx->hw_device_ctx = av_buffer_ref(m_HwDeviceCtx);
+    m_DecodeCodecCtx->get_format = get_format;
+
     /* open it */
     if ((ret = avcodec_open2(m_DecodeCodecCtx, codec, NULL)) < 0)
     {
@@ -292,7 +399,7 @@ ERR_PROC:
     return ret;
 }
 
-int VideoPictureSoftTranscode::closeDecoder()
+int VideoIntelQsvTranscode::closeDecoder()
 {
     /* flush the decoder */
     if (m_DecodeCodecCtx != nullptr)
@@ -303,7 +410,7 @@ int VideoPictureSoftTranscode::closeDecoder()
     return 0;
 }
 
-int VideoPictureSoftTranscode::openScaleFilter()
+int VideoIntelQsvTranscode::openScaleFilter()
 {
     char args[512];
     int ret = 0;
@@ -313,7 +420,7 @@ int VideoPictureSoftTranscode::openScaleFilter()
     AVRational time_base = (AVRational){1, framerate};
     AVRational sample_aspect_ratio = m_DecodeCodecCtx->sample_aspect_ratio;
 
-    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_NONE};
+    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_QSV, AV_PIX_FMT_NONE};
     const AVFilter *buffersrc = avfilter_get_by_name("buffer");
     const AVFilter *buffersink = avfilter_get_by_name("buffersink");
 
@@ -347,6 +454,19 @@ int VideoPictureSoftTranscode::openScaleFilter()
     {
         LOGE(LOG_TAGS "Cannot create buffer source.\n");
         goto ERR_PROC;
+    }
+
+    if (m_DecodeCodecCtx->hw_frames_ctx)
+    {
+        AVBufferSrcParameters *par = av_buffersrc_parameters_alloc();
+        par->hw_frames_ctx = m_DecodeCodecCtx->hw_frames_ctx;
+        ret = av_buffersrc_parameters_set(m_ScaleBuffersrcCtx, par);
+        av_freep(&par);
+        if (ret < 0)
+        {
+            LOGE(LOG_TAGS "Failed to set parameters to buffersrc.\n");
+            goto ERR_PROC;
+        }
     }
 
     /* buffer video sink: to terminate the filter chain. */
@@ -393,7 +513,7 @@ int VideoPictureSoftTranscode::openScaleFilter()
     inputs->pad_idx = 0;
     inputs->next = NULL;
 
-    snprintf(args, sizeof(args), "scale=%d:%d", encWidth, encHeight);
+    snprintf(args, sizeof(args), "scale_qsv=w=%d:h=%d", encWidth, encHeight);
     if ((ret = avfilter_graph_parse_ptr(m_ScaleFilterGraph, args,
                                         &inputs, &outputs, NULL)) < 0)
     {
@@ -418,7 +538,7 @@ ERR_PROC:
     return ret;
 }
 
-int VideoPictureSoftTranscode::closeScaleFilter()
+int VideoIntelQsvTranscode::closeScaleFilter()
 {
     m_ScaleBuffersinkCtx = nullptr;
     m_ScaleBuffersrcCtx = nullptr;
@@ -426,16 +546,23 @@ int VideoPictureSoftTranscode::closeScaleFilter()
     return 0;
 }
 
-int VideoPictureSoftTranscode::openEncoder()
+int VideoIntelQsvTranscode::openEncoder()
 {
     int ret = 0;
-    AVCodecID codecId;
-    const AVCodec *codec = nullptr;
-    codecId = m_EncodeParam.getCodecId();
 
-    if (codecId == AV_CODEC_ID_MJPEG)
+    AVCodecID codecId;
+    AVDictionary *opt = nullptr;
+    const AVCodec *codec = nullptr;
+
+    AVBufferRef *frames_ref = nullptr;
+    codecId = m_EncodeParam.getCodecId();
+    if (codecId == AV_CODEC_ID_H264)
     {
-        codec = avcodec_find_encoder_by_name("mjpeg");
+        codec = avcodec_find_encoder_by_name("h264_qsv");
+    }
+    else if (codecId == AV_CODEC_ID_HEVC)
+    {
+        codec = avcodec_find_encoder_by_name("hevc_qsv");
     }
 
     if (codec == nullptr)
@@ -460,8 +587,16 @@ int VideoPictureSoftTranscode::openEncoder()
 
     updateEncoder();
 
+    frames_ref = av_buffersink_get_hw_frames_ctx(m_ScaleBuffersinkCtx);
+    m_EncodeCodecCtx->hw_frames_ctx = av_buffer_ref(frames_ref);
+
+    //编码速度
+    av_dict_set(&opt, "preset", "veryfast", 0);
+    //零延时编码
+    av_dict_set(&opt, "tune", "zerolatency", 0);
+
     /* open it */
-    if ((ret = avcodec_open2(m_EncodeCodecCtx, codec, NULL)) < 0)
+    if ((ret = avcodec_open2(m_EncodeCodecCtx, codec, &opt)) < 0)
     {
         LOGE(LOG_TAGS "Could not open encoder codec.\n");
         goto ERR_PROC;
@@ -473,7 +608,7 @@ ERR_PROC:
     return ret;
 }
 
-int VideoPictureSoftTranscode::closeEncoder()
+int VideoIntelQsvTranscode::closeEncoder()
 {
     /* flush the encoder */
     if (m_EncodeCodecCtx != nullptr)
@@ -484,13 +619,14 @@ int VideoPictureSoftTranscode::closeEncoder()
     return 0;
 }
 
-int VideoPictureSoftTranscode::updateEncoder()
+int VideoIntelQsvTranscode::updateEncoder()
 {
     int bitrate = m_EncodeParam.getBitrate();
     int width = m_EncodeParam.getVideoSize().Width;
     int height = m_EncodeParam.getVideoSize().Height;
     int framerate = m_EncodeParam.getFramerate();
     int iFrameInterval = m_EncodeParam.getIFrameInterval();
+    bool bEncodeIFrame = m_EncodeParam.getEncodeIFrame();
 
     if (framerate <= 0)
     {
@@ -516,9 +652,11 @@ int VideoPictureSoftTranscode::updateEncoder()
      * then gop_size is ignored and the output of encoder
      * will always be I frame irrespective to gop_size
      */
-    m_EncodeCodecCtx->gop_size = iFrameInterval;
+    m_EncodeCodecCtx->gop_size = bEncodeIFrame ? 1 : iFrameInterval;
     m_EncodeCodecCtx->max_b_frames = 0;
-    m_EncodeCodecCtx->pix_fmt = AV_PIX_FMT_YUVJ420P;
+    m_EncodeCodecCtx->pix_fmt = AV_PIX_FMT_QSV;
+    //编码器输出extradata
+    m_EncodeCodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     //TODO:add flags
     return 0;
 }

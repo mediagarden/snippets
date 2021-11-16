@@ -109,6 +109,7 @@ VideoSoftTranscode::VideoSoftTranscode()
 
 VideoSoftTranscode::~VideoSoftTranscode()
 {
+    close();
 }
 
 int VideoSoftTranscode::open()
@@ -127,6 +128,11 @@ int VideoSoftTranscode::open()
     m_LastEncodePts = 0;
     return ret;
 ERROR_PROC:
+    closeDecoder();
+    closeScaleFilter();
+    closeEncoder();
+    m_ScaleFilterReady = false;
+    m_LastEncodePts = 0;
     return ret;
 }
 
@@ -136,6 +142,7 @@ int VideoSoftTranscode::close()
     closeScaleFilter();
     closeEncoder();
     m_ScaleFilterReady = false;
+    m_LastEncodePts = 0;
     return 0;
 }
 
@@ -143,6 +150,16 @@ int VideoSoftTranscode::reset()
 {
     close();
     return open();
+}
+
+int VideoSoftTranscode::getVideoCodecPar(AVCodecParameters *codecpar)
+{
+    return avcodec_parameters_from_context(codecpar, m_EncodeCodecCtx);
+}
+
+bool VideoSoftTranscode::readyForReceive()
+{
+    return m_ScaleFilterReady;
 }
 
 int VideoSoftTranscode::sendPacket(AVPacket *packet)
@@ -164,24 +181,12 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
         LOGE(LOG_TAGS "Error sending a packet for decoding.\n");
         return ret;
     }
-
-    if (!m_ScaleFilterReady)
-    {
-        if ((ret = openScaleFilter()) < 0)
-        {
-            LOGE(LOG_TAGS "Open scale filter failed.\n");
-            return ret;
-        }
-        LOGI(LOG_TAGS "Open scale filter success.\n");
-        m_ScaleFilterReady = true;
-    }
-
     AVFrame *frame;
     AVFrame *filter_frame;
     frame = av_frame_alloc();
     assert(frame != nullptr);
     filter_frame = av_frame_alloc();
-    assert(frame != nullptr);
+    assert(filter_frame != nullptr);
 
     while (ret >= 0)
     {
@@ -194,6 +199,17 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
         {
             LOGE(LOG_TAGS "Error during decoding.\n");
             return ret;
+        }
+
+        if (!m_ScaleFilterReady)
+        {
+            if ((ret = openScaleFilter()) < 0)
+            {
+                LOGE(LOG_TAGS "Open scale filter failed.\n");
+                return ret;
+            }
+            LOGI(LOG_TAGS "Open scale filter success.\n");
+            m_ScaleFilterReady = true;
         }
 
         //对视频进行抽帧
@@ -231,8 +247,12 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
 
             //送编码的帧,不需要指定帧类型
             filter_frame->pict_type = AV_PICTURE_TYPE_NONE;
-            ret = avcodec_send_frame(m_EncodeCodecCtx, filter_frame);
-            if (ret < 0)
+            //如果只送I帧,则编为I帧
+            if (bEncodeIFrame)
+            {
+                filter_frame->pict_type = AV_PICTURE_TYPE_I;
+            }
+            if ((ret = avcodec_send_frame(m_EncodeCodecCtx, filter_frame)) < 0)
             {
                 LOGE(LOG_TAGS "Error sending a packet for decoding.\n");
                 break;
@@ -249,6 +269,10 @@ int VideoSoftTranscode::sendPacket(AVPacket *packet)
 int VideoSoftTranscode::receivePacket(AVPacket *packet)
 {
     int ret = 0;
+    if (!readyForReceive())
+    {
+        return -1;
+    }
     ret = avcodec_receive_packet(m_EncodeCodecCtx, packet);
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
     {
@@ -299,10 +323,10 @@ int VideoSoftTranscode::openDecoder()
     /* open it */
     if ((ret = avcodec_open2(m_DecodeCodecCtx, codec, NULL)) < 0)
     {
-        LOGE(LOG_TAGS "Could not open codec.\n");
+        LOGE(LOG_TAGS "Could not open decoder codec.\n");
         goto ERR_PROC;
     }
-    LOGI(LOG_TAGS "Open codec success.\n");
+    LOGI(LOG_TAGS "Open decoder codec success.\n");
     return 0;
 ERR_PROC:
     return ret;
@@ -325,8 +349,8 @@ int VideoSoftTranscode::openScaleFilter()
     int ret = 0;
     int encWidth = m_EncodeParam.getVideoSize().Width;
     int encHeight = m_EncodeParam.getVideoSize().Height;
-
-    AVRational time_base = m_DecodeCodecCtx->time_base;
+    int framerate = m_EncodeParam.getFramerate();
+    AVRational time_base = (AVRational){1, framerate};
     AVRational sample_aspect_ratio = m_DecodeCodecCtx->sample_aspect_ratio;
 
     enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
@@ -413,11 +437,13 @@ int VideoSoftTranscode::openScaleFilter()
     if ((ret = avfilter_graph_parse_ptr(m_ScaleFilterGraph, args,
                                         &inputs, &outputs, NULL)) < 0)
     {
+        LOGE(LOG_TAGS "Failed to set avfilter_graph_parse_ptr.\n");
         goto ERR_PROC;
     }
 
     if ((ret = avfilter_graph_config(m_ScaleFilterGraph, NULL)) < 0)
     {
+        LOGE(LOG_TAGS "Failed to set avfilter_graph_config.\n");
         goto ERR_PROC;
     }
     avfilter_inout_free(&inputs);
@@ -469,13 +495,6 @@ int VideoSoftTranscode::openEncoder()
         goto ERR_PROC;
     }
 
-    if (codec == nullptr)
-    {
-        LOGE(LOG_TAGS "Could not find encoder for %d.\n", codecId);
-        ret = AVERROR(EINVAL);
-        goto ERR_PROC;
-    }
-
     m_EncodeCodecCtx = avcodec_alloc_context3(codec);
     if (m_EncodeCodecCtx == nullptr)
     {
@@ -494,11 +513,11 @@ int VideoSoftTranscode::openEncoder()
     /* open it */
     if ((ret = avcodec_open2(m_EncodeCodecCtx, codec, &opt)) < 0)
     {
-        LOGE(LOG_TAGS "Could not open codec.\n");
+        LOGE(LOG_TAGS "Could not open encoder codec.\n");
         goto ERR_PROC;
     }
 
-    LOGI(LOG_TAGS "Open codec success.\n");
+    LOGI(LOG_TAGS "Open encoder codec success.\n");
     return 0;
 ERR_PROC:
     return ret;
@@ -522,6 +541,7 @@ int VideoSoftTranscode::updateEncoder()
     int height = m_EncodeParam.getVideoSize().Height;
     int framerate = m_EncodeParam.getFramerate();
     int iFrameInterval = m_EncodeParam.getIFrameInterval();
+    bool bEncodeIFrame = m_EncodeParam.getEncodeIFrame();
 
     if (framerate <= 0)
     {
@@ -547,9 +567,11 @@ int VideoSoftTranscode::updateEncoder()
      * then gop_size is ignored and the output of encoder
      * will always be I frame irrespective to gop_size
      */
-    m_EncodeCodecCtx->gop_size = iFrameInterval;
+    m_EncodeCodecCtx->gop_size = bEncodeIFrame ? 1 : iFrameInterval;
     m_EncodeCodecCtx->max_b_frames = 0;
     m_EncodeCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
+    //编码器输出extradata
+    m_EncodeCodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     //TODO:add flags
     return 0;
 }

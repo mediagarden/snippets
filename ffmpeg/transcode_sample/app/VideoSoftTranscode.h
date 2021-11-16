@@ -52,6 +52,10 @@ public:
 
     int reset();
 
+    int getVideoCodecPar(AVCodecParameters *codecpar);
+
+    bool readyForReceive();
+
     int sendPacket(AVPacket *packet);
 
     int receivePacket(AVPacket *packet);

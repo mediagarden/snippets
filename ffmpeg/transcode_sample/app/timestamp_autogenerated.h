@@ -1,4 +1,4 @@
 #define BH_PROJECT_NAME "transcode"
 #define BH_SOFTWARE_VERSION "1.0.0.0"
-#define BH_SOFTWARE_DATE "Nov 14 2021"
-#define BH_SOFTWARE_TIME "11:37:40"
+#define BH_SOFTWARE_DATE "11月 15 2021"
+#define BH_SOFTWARE_TIME "22:06:47"

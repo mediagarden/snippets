@@ -184,7 +184,8 @@ public:
 
 private:
     int m_EncodeMode;    //转码类型:流,图片
-    bool m_EncodeIFrame; //只转码I帧
+    bool m_EncodeIFrame; //只转码I帧,仅对转图片有效
+                         //转流的话帧率过低SRS不支持
 
     AVCodecID m_CodecId;
     int m_Width;
@@ -208,7 +209,7 @@ public:
 
 private:
     void calcFrameRate();
-    
+
     void reset();
 
     int64_t m_s64LastRecvTime;     //上一次收流时间
@@ -259,6 +260,10 @@ public:
     virtual int close() = 0;
 
     virtual int reset() = 0;
+
+    virtual int getVideoCodecPar(AVCodecParameters *codecpar) = 0;
+
+    virtual bool readyForReceive() = 0;
 
     virtual int sendPacket(AVPacket *packet) = 0;
 
