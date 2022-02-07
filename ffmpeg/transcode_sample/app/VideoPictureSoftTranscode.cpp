@@ -531,7 +531,7 @@ int VideoPictureSoftTranscode::updateEncoder()
      * then gop_size is ignored and the output of encoder
      * will always be I frame irrespective to gop_size
      */
-    m_EncodeCodecCtx->gop_size = iFrameInterval;
+    m_EncodeCodecCtx->gop_size = 0;
     m_EncodeCodecCtx->max_b_frames = 0;
     m_EncodeCodecCtx->pix_fmt = AV_PIX_FMT_YUVJ420P;
     //TODO:add flags

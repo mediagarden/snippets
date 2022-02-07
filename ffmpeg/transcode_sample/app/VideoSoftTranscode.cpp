@@ -588,8 +588,6 @@ int VideoSoftTranscode::updateEncoder()
     m_EncodeCodecCtx->gop_size = bEncodeIFrame ? 1 : iFrameInterval;
     m_EncodeCodecCtx->max_b_frames = 0;
     m_EncodeCodecCtx->pix_fmt = AV_PIX_FMT_YUV420P;
-    //编码器输出extradata
-    m_EncodeCodecCtx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     //TODO:add flags
     return 0;
 }
