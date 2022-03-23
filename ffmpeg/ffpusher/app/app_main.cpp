@@ -169,7 +169,7 @@ int outputInterrupt(void *opaque)
 
 int OpenInput(CStreamPuller *puller)
 {
-    printf("open input");
+    printf("open input\n");
 
     if (puller->m_InputOpen)
     {
@@ -197,7 +197,7 @@ int OpenInput(CStreamPuller *puller)
     else if (strncmp(puller->m_InputPath, "rtsp://", strlen("rtsp://")) == 0)
     {
         char option_key[] = "rtsp_transport";
-        char option_value[] = "tcp";
+        char option_value[] = "udp";
         av_dict_set(&opt, option_key, option_value, 0);
         av_dict_set(&opt, "stimeout", "10000000", 0);
         av_dict_set(&opt, "rtbufsize", "32000", 0);
@@ -207,7 +207,7 @@ int OpenInput(CStreamPuller *puller)
     int ret = avformat_open_input(&puller->m_InputFmtCtx, puller->m_InputPath, NULL, &opt);
     if (ret < 0)
     {
-        printf("Could not open input file.\n");
+        printf("Could not open input file %d.\n", ret);
         goto ERROR_PROC;
     }
 
@@ -264,7 +264,7 @@ int OpenOutput(CStreamPuller *puller)
     {
         outformat = "mpegts";
         av_dict_set(&opt, "localaddr", puller->m_OutputAddr, 0);
-        av_dict_set(&opt, "pkt_size", "1316", 0); //UDP协议时，需要设置包大小
+        av_dict_set(&opt, "pkt_size", "1316", 0); // UDP协议时，需要设置包大小
     }
     else if (strncmp(puller->m_OutputPath, "rtmp://", strlen("rtmp://")) == 0)
     {
@@ -277,7 +277,6 @@ int OpenOutput(CStreamPuller *puller)
         printf("Open output context failed.\n");
         goto ERROR_PROC;
     }
-
     //设置超时回调函数
     puller->m_OutputFmtCtx->interrupt_callback.callback = outputInterrupt;
     puller->m_OutputFmtCtx->interrupt_callback.opaque = puller;
@@ -293,6 +292,7 @@ int OpenOutput(CStreamPuller *puller)
         AVStream *stream = avformat_new_stream(puller->m_OutputFmtCtx, NULL);
         ret = avcodec_parameters_copy(stream->codecpar, puller->m_InputFmtCtx->streams[index]->codecpar);
         stream->codecpar->codec_tag = 0; // fix bug for "incompatible with output codec id" bh_lfs@2021.08.26
+
         if (ret < 0)
         {
             printf("Copy codec context failed.\n");
@@ -367,6 +367,157 @@ int ReadPacketFromInput(CStreamPuller *puller, AVPacket *packet)
     return av_read_frame(puller->m_InputFmtCtx, packet);
 }
 
+void hexdump(uint8_t *buf, int len)
+{
+    int i = 0;
+
+    printf("\n----------------------hexdump------------------------\n");
+    for (i = 0; i < len; i++)
+    {
+        printf("%02x ", buf[i]);
+        if ((i + 1) % 16 == 0)
+        {
+            printf("\n");
+        }
+    }
+
+    if (i % 16 != 0)
+    {
+        printf("\n");
+    }
+
+    printf("---------------------hexdump-------------------------\n\n");
+}
+
+// Rec. ITU-T H.264 (02/2014)
+// Table 7-1 - NAL unit type codes, syntax element categories, and NAL unit type classes
+#define H264_NAL_IDR 5            // Coded slice of an IDR picture
+#define H264_NAL_SEI 6            // Supplemental enhancement information
+#define H264_NAL_SPS 7            // Sequence parameter set
+#define H264_NAL_PPS 8            // Picture parameter set
+#define H264_NAL_AUD 9            // Access unit delimiter
+#define H264_NAL_SPS_EXTENSION 13 // Access unit delimiter
+#define H264_NAL_PREFIX 14        // Prefix NAL unit
+#define H264_NAL_SPS_SUBSET 15    // Subset sequence parameter set
+#define H264_NAL_XVC 20           // Coded slice extension(SVC/MVC)
+#define H264_NAL_3D 21            // Coded slice extension for a depth view component or a 3D-AVC texture view component
+
+static bool findStartCode3(uint8_t *buffer)
+{
+    return (buffer[0] == 0 && buffer[1] == 0 && buffer[2] == 1);
+}
+
+static bool findStartCode4(uint8_t *buffer)
+{
+    return (buffer[0] == 0 && buffer[1] == 0 && buffer[2] == 0 && buffer[3] == 1);
+}
+
+static int findNalu(uint8_t *pInData, size_t nDataLen, uint8_t **pStartPos, uint8_t **pEndPos)
+{
+    int pos = 0;
+    int nFoundCount = 0;
+    int nRewind = 0;
+    while (pos < nDataLen)
+    {
+        if (pos >= 3 && findStartCode3(&pInData[pos - 3]))
+        {
+            nFoundCount++;
+            //找到第一个00 00 01:起始位置
+            if (nFoundCount == 1)
+            {
+                *pStartPos = pInData + pos;
+                if (pos >= 4 && findStartCode4(&pInData[pos - 4]))
+                {
+                    *pStartPos = pInData + pos; // pStartPos 指向 NALU Type
+                }
+            }
+
+            //找到第二个00 00 01:结束位置
+            if (nFoundCount == 2)
+            {
+                *pEndPos = pInData + pos - 3;
+                if (findStartCode4(&pInData[pos - 4]))
+                {
+                    *pEndPos = pInData + pos - 4; // pEndPos 指向 00 00 00 01 的开头
+                }
+            }
+        }
+
+        if (nFoundCount == 2)
+        {
+            return *pEndPos - *pStartPos;
+        }
+
+        pos++;
+    }
+
+    //最后一个NALU单元
+    if (nFoundCount == 1)
+    {
+        *pEndPos = pInData + nDataLen;
+        return *pEndPos - *pStartPos;
+    }
+    else
+    {
+        return -1;
+    }
+}
+
+static void FilterVideoPacket(AVPacket *packet_in, AVPacket *packet_out)
+{
+    if (0 != av_new_packet(packet_out, packet_in->size))
+    {
+        printf("Can not alloc packet.\n");
+        return;
+    }
+
+    packet_out->pts = packet_in->pts;
+    packet_out->dts = packet_in->dts;
+    packet_out->size = 0;
+    packet_out->stream_index = packet_in->stream_index;
+    packet_out->flags = packet_in->flags;
+    packet_out->duration = packet_in->duration;
+
+    uint8_t *pInData = packet_in->data;
+    size_t nDataLen = packet_in->size;
+
+    uint8_t *pStartPos = packet_in->data;
+    uint8_t *pEndPos = packet_in->data;
+
+    const uint8_t startcode[] = {0, 0, 0, 1};
+    const int startlen = 4;
+    while (pInData + nDataLen - pEndPos > 0)
+    {
+        //找一个NALU单元
+        uint8_t *pBegPos = pEndPos;
+        size_t dataLeft = pInData + nDataLen - pBegPos;
+        int length = findNalu(pBegPos, dataLeft, &pStartPos, &pEndPos);
+        //printf("orginal\n");
+        //hexdump(pBegPos, pEndPos - pBegPos + 4 + 4);
+        //printf("found\n");
+        //hexdump(pStartPos, length);
+
+        //printf("length %d.\n", length);
+        if (length < -1)
+        {
+            break;
+        }
+        //码流中存在这样的NALU
+        //0000b886h: 00 00 00 01 00 00 00 00 01 09 F0                ; ..........?
+        int nalutype = pStartPos[0] & 0x1f;
+        if (H264_NAL_SEI != nalutype && 0 != nalutype )
+        {
+            //printf("copy  %d.\n", length);
+            // av_hex_dump_log(NULL, AV_LOG_ERROR, startcode, startlen);
+            memcpy(&packet_out->data[packet_out->size], startcode, startlen);
+            packet_out->size += startlen;
+            // av_hex_dump_log(NULL, AV_LOG_ERROR, pStartPos, length);
+            memcpy(&packet_out->data[packet_out->size], pStartPos, length);
+            packet_out->size += length;
+        }
+    };
+}
+
 int WritePacketToOutput(CStreamPuller *puller, AVPacket *packet)
 {
     if (puller->m_InputVideoStream == packet->stream_index)
@@ -378,7 +529,16 @@ int WritePacketToOutput(CStreamPuller *puller, AVPacket *packet)
             av_packet_rescale_ts(packet, inputStream->time_base, outputStream->time_base);
             packet->stream_index = puller->m_OutputVideoStream;
             puller->m_OutputLastTime = av_gettime();
-            int ret = av_interleaved_write_frame(puller->m_OutputFmtCtx, packet);
+            AVPacket *pkt = NULL;
+            pkt = av_packet_alloc();
+            if (pkt == NULL)
+            {
+                printf("Can not alloc packet.\n");
+                return AVERROR(ENOMEM);
+            }
+            FilterVideoPacket(packet, pkt); //过滤SEI,AUD
+            int ret = av_interleaved_write_frame(puller->m_OutputFmtCtx, pkt);
+            av_packet_free(&pkt);
             if (ret == 0)
             {
                 return ret;
@@ -501,11 +661,12 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    av_register_all();
+    avformat_network_init();
     int ret = 0;
 
     const char *inputPath = argv[1];
     const char *outputPath = argv[2];
-
 
     CStreamPuller *puller = NewStreamPuller();
 
@@ -562,7 +723,6 @@ END_PROC:
 
     DeletePacket(puller, &packet);
     DeleteStreamPuller(&puller);
-
 
     return ret;
 }
